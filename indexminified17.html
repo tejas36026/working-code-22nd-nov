@@ -1,0 +1,550 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title> </title>
+    <link rel="stylesheet" type="text/css" href="styles.css">
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/body-pix"></script>
+    <script src="bodyParts.js"></script>
+    <script src="function.js"></script>
+</head>
+<body>
+    <img id="sourceImage" src="6.jpg" crossorigin="anonymous" style="display: none;">
+    <div id="mainContainer"></div>
+  <canvas id="visualizationCanvas" width="800" height="600"></canvas>
+
+<script>
+
+let net;
+
+const worker = new Worker('keypoints-worker.js');
+let collectedPoints = new Map();
+
+async function processImageWithOverlay() {
+    const img = document.getElementById('sourceImage');
+    const mainContainer = document.getElementById('mainContainer');
+    mainContainer.innerHTML = '';
+
+    const imageGrid = document.createElement('div');
+    imageGrid.className = 'image-grid';
+
+    const segmentation = await net.segmentPersonParts(img);
+    const bodyPartImages = {};
+
+    collectedPoints.clear();
+
+    for (let partId = 0; partId < 24; partId++) {
+        const partName = Object.keys(BODY_PARTS)[partId];
+        if (!partName) continue;
+
+        const segmentCanvas = document.createElement('canvas');
+        segmentCanvas.width = img.width;
+        segmentCanvas.height = img.height;
+        const segmentCtx = segmentCanvas.getContext('2d');
+
+        segmentCtx.drawImage(img, 0, 0);
+
+        const imageData = segmentCtx.getImageData(0, 0, img.width, img.height);
+        for (let i = 0; i < segmentation.data.length; i++) {
+            const baseIdx = i * 4;
+            if (segmentation.data[i] !== partId) {
+                imageData.data[baseIdx + 3] = 0;
+            }
+        }
+
+        const variations = await processSegmentVariations(imageData, partName);
+
+        // Collect all variations in bodyPartImages
+        bodyPartImages[partName] = variations.map(variation => ({
+            imageData: variation.data,
+            width: img.width,
+            height: img.height,
+            extremePoints: variation.extremePoints
+        }));
+       
+        
+        // console.log(`Populated bodyPartImages for ${partName}:`, bodyPartImages[partName]);
+
+
+        variations.forEach((variation, index) => {
+            if (!variation.data) return;
+
+            const pixelData = new Uint8ClampedArray(variation.data);
+            const variationCanvas = document.createElement('canvas');
+            variationCanvas.width = img.width;
+            variationCanvas.height = img.height;
+            variationCanvas.id = "canvasid";
+            const variationCtx = variationCanvas.getContext('2d');
+
+            const variationImageData = new ImageData(pixelData, img.width, img.height);
+            variationCtx.putImageData(variationImageData, 0, 0);
+
+            // Draw extreme keypoints
+            if (variation.extremePoints) {
+                drawKeypoints(variationCtx, variation.extremePoints, '#FF0000', BODY_PARTS[partName].name);
+            }
+            
+            const wrapper = document.createElement('div');
+            wrapper.className = 'image-wrapper';
+
+            const label = document.createElement('div');
+            label.className = 'keypoints-label';
+            label.textContent = BODY_PARTS[partName].name;
+
+            wrapper.appendChild(variationCanvas);
+            wrapper.appendChild(label);
+            // imageGrid.appendChild(wrapper);
+        });
+    }
+
+    mainContainer.appendChild(imageGrid);
+
+    const pointsToProcess = {
+        // Faces
+        leftFace: collectedPoints.get('left_face'),
+        rightFace: collectedPoints.get('right_face'),
+        
+        // Arms
+        leftUpperArmFront: collectedPoints.get('left_upper_arm_front'),
+        leftUpperArmBack: collectedPoints.get('left_upper_arm_back'),
+        leftLowerArmFront: collectedPoints.get('left_lower_arm_front'),
+        leftLowerArmBack: collectedPoints.get('left_lower_arm_back'),
+        leftHand: collectedPoints.get('left_hand'),
+        rightUpperArmFront: collectedPoints.get('right_upper_arm_front'),
+        rightUpperArmBack: collectedPoints.get('right_upper_arm_back'),
+        rightLowerArmFront: collectedPoints.get('right_lower_arm_front'),
+        rightLowerArmBack: collectedPoints.get('right_lower_arm_back'),
+        rightHand: collectedPoints.get('right_hand'),
+        
+        // Torso
+        torsoFront: collectedPoints.get('torso_front'),
+        torsoBack: collectedPoints.get('torso_back'),
+        
+        // Legs
+        leftUpperLegFront: collectedPoints.get('left_upper_leg_front'),
+        leftUpperLegBack: collectedPoints.get('left_upper_leg_back'),
+        leftLowerLegFront: collectedPoints.get('left_lower_leg_front'),
+        leftLowerLegBack: collectedPoints.get('left_lower_leg_back'),
+        rightUpperLegFront: collectedPoints.get('right_upper_leg_front'),
+        rightUpperLegBack: collectedPoints.get('right_upper_leg_back'),
+        rightLowerLegFront: collectedPoints.get('right_lower_leg_front'),
+        rightLowerLegBack: collectedPoints.get('right_lower_leg_back'),
+        
+        // Feet
+        leftFoot: collectedPoints.get('left_foot'),
+        rightFoot: collectedPoints.get('right_foot')
+    };
+    console.log('Sending data to worker with bodyPartImages:', bodyPartImages);
+
+    worker.postMessage({
+        type: 'calculateAverage',
+        points: pointsToProcess,
+        bodyPartImages: bodyPartImages,
+        partNames: {
+            leftUpperArmFront: 'left_upper_arm_front',
+            leftUpperArmBack: 'left_upper_arm_back',
+            leftLowerArmFront: 'left_lower_arm_front',
+            leftLowerArmBack: 'left_lower_arm_back',
+            leftHand: 'left_hand',
+            rightUpperArmFront: 'right_upper_arm_front',
+            rightUpperArmBack: 'right_upper_arm_back',
+            rightLowerArmFront: 'right_lower_arm_front',
+            rightLowerArmBack: 'right_lower_arm_back',
+            rightHand: 'right_hand',
+            leftFoot: 'left_foot',
+            rightFoot: 'right_foot',
+            leftUpperFoot: 'left_upper_foot',
+            leftLowerFoot: 'left_lower_foot',
+            rightUpperFoot: 'right_upper_foot',
+            rightLowerFoot: 'right_lower_foot',
+            leftUpperLegFront: 'left_upper_leg_front',
+            leftUpperLegBack: 'left_upper_leg_back',
+            leftLowerLegFront: 'left_lower_leg_front',
+            leftLowerLegBack: 'left_lower_leg_back',
+            rightUpperLegFront: 'right_upper_leg_front',
+            rightUpperLegBack: 'right_upper_leg_back',
+            rightLowerLegFront: 'right_lower_leg_front',
+            rightLowerLegBack: 'right_lower_leg_back',
+        }
+    });
+
+    worker.onmessage = function(e) {
+        const { type, averages, extremePoints, partNames } = e.data;
+        if (type === 'combinedResults' && (averages || extremePoints)) {
+            const canvas = document.createElement('canvas');
+            canvas.width = img.width;
+            canvas.height = img.height;
+            canvas.id = "canvasid1";
+            const ctx = canvas.getContext('2d');
+            
+            // Draw original image
+            ctx.drawImage(img, 0, 0);
+            
+            // Set text properties for labels
+            ctx.font = '14px Arial';
+            ctx.textAlign = 'left';
+            ctx.textBaseline = 'top';
+
+            // Draw extreme points with labels
+            // if (extremePoints) {
+            //     Object.entries(extremePoints).forEach(([partName, points]) => {
+            //         if (!points) return;
+                    
+            //         // Choose color based on whether it's front or back
+            //         const color = partName.includes('Front') ? '#0000FF' : '#00FF00';
+                    
+            //         // Draw top point and label
+            //         if (points.top) {
+            //             // Draw point
+            //             ctx.beginPath();
+            //             ctx.arc(points.top.x, points.top.y, 4, 0, 2 * Math.PI);
+            //             ctx.fillStyle = color;
+            //             ctx.fill();
+                        
+            //             // Draw label with background
+            //             const label = `${BODY_PARTS[partName]?.name || partName} Top`;
+            //             const labelWidth = ctx.measureText(label).width;
+                        
+            //             // Draw label background
+            //             ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';
+            //             ctx.fillRect(points.top.x + 5, points.top.y - 20, labelWidth + 6, 20);
+                        
+            //             // Draw label text
+            //             ctx.fillStyle = color;
+            //             ctx.fillText(label, points.top.x + 8, points.top.y - 18);
+            //         }
+                    
+            //         // Draw bottom point and label
+            //         if (points.bottom) {
+            //             // Draw point
+            //             ctx.beginPath();
+            //             ctx.arc(points.bottom.x, points.bottom.y, 4, 0, 2 * Math.PI);
+            //             ctx.fillStyle = color;
+            //             ctx.fill();
+                        
+            //             // Draw label with background
+            //             const label = `${BODY_PARTS[partName]?.name || partName} Bottom`;
+            //             const labelWidth = ctx.measureText(label).width;
+                        
+            //             // Draw label background
+            //             ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';
+            //             ctx.fillRect(points.bottom.x + 5, points.bottom.y, labelWidth + 6, 20);
+                        
+            //             // Draw label text
+            //             ctx.fillStyle = color;
+            //             ctx.fillText(label, points.bottom.x + 8, points.bottom.y + 2);
+            //         }
+                    
+            //         // Draw connecting line
+            //         if (points.top && points.bottom) {
+            //             ctx.beginPath();
+            //             ctx.moveTo(points.top.x, points.top.y);
+            //             ctx.lineTo(points.bottom.x, points.bottom.y);
+            //             ctx.strokeStyle = color;
+            //             ctx.lineWidth = 2;
+            //             ctx.stroke();
+            //         }
+            //     });
+            // }
+
+            // Draw averages with different color and style
+            // if (averages) {
+            //     Object.entries(averages).forEach(([partName, points]) => {
+            //         if (!points) return;
+                    
+            //         const color = '#FF0000'; // Red for average points
+                    
+            //         if (points.top) {
+            //             // Draw average top point
+            //             ctx.beginPath();
+            //             ctx.arc(points.top.x, points.top.y, 6, 0, 2 * Math.PI);
+            //             ctx.fillStyle = color;
+            //             ctx.fill();
+                        
+            //             // Draw average label with background
+            //             const label = `AVG ${partName} Top`;
+            //             const labelWidth = ctx.measureText(label).width;
+                        
+            //             ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';
+            //             ctx.fillRect(points.top.x + 5, points.top.y - 20, labelWidth + 6, 20);
+                        
+            //             ctx.fillStyle = color;
+            //             ctx.fillText(label, points.top.x + 8, points.top.y - 18);
+            //         }
+                    
+            //         if (points.bottom) {
+            //             // Draw average bottom point
+            //             ctx.beginPath();
+            //             ctx.arc(points.bottom.x, points.bottom.y, 6, 0, 2 * Math.PI);
+            //             ctx.fillStyle = color;
+            //             ctx.fill();
+                        
+            //             // Draw average label with background
+            //             const label = `AVG ${partName} Bottom`;
+            //             const labelWidth = ctx.measureText(label).width;
+                        
+            //             ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';
+            //             ctx.fillRect(points.bottom.x + 5, points.bottom.y, labelWidth + 6, 20);
+                        
+            //             ctx.fillStyle = color;
+            //             ctx.fillText(label, points.bottom.x + 8, points.bottom.y + 2);
+            //         }
+                    
+            //         // Draw connecting line for averages
+            //         if (points.top && points.bottom) {
+            //             ctx.beginPath();
+            //             ctx.moveTo(points.top.x, points.top.y);
+            //             ctx.lineTo(points.bottom.x, points.bottom.y);
+            //             ctx.strokeStyle = color;
+            //             ctx.lineWidth = 3; // Slightly thicker for average lines
+            //             ctx.stroke();
+            //         }
+            //     });
+            // }
+
+            const wrapper = document.createElement('div');
+            wrapper.className = 'image-wrapper';
+            
+            const labelDiv = document.createElement('div');
+            labelDiv.className = 'keypoints-label';
+            labelDiv.textContent = 'Combined Points Visualization';
+            
+            wrapper.appendChild(canvas);
+            
+            const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+
+            // Get current timestamp
+            const timestamp = Date.now();
+
+            // Define type based on the worker message type
+            const type = e.data.type; // 'combinedResults' from the previous worker
+
+            // Create the worker message object
+            const workerMessage = {
+                type: type,
+                imageData: imageData,
+                width: canvas.width,
+                height: canvas.height,
+                extremePoints: extremePoints,
+                averages: averages,
+                timestamp: timestamp,
+                partNames: partNames,
+                bodyPartImages: bodyPartImages ,
+                // Add body part images to the message,
+                rotationAngles: [0, 45, 90, 135, 180] // Ensure this array is provided
+            };
+
+            // Create and initialize post-processing worker
+            const postprocessingWorker = new Worker('post-processing-workerold.js');
+
+            // Send message to worker
+            postprocessingWorker.postMessage(workerMessage);
+
+            postprocessingWorker.onmessage = function(e) {
+                if (e.data.type === 'processedVariations') {
+                    const container = document.createElement('div');
+                    container.id = 'variations-container';
+                    document.body.appendChild(container);
+
+                    const visualizeVariations = (variations, container) => {
+                        container.innerHTML = '';
+                        container.style.display = 'grid';
+                        container.style.gridTemplateColumns = 'repeat(3, 1fr)';
+                        container.style.gap = '20px';
+                        container.style.padding = '20px';
+                        container.style.backgroundColor = '#f0f0f0';
+                        
+                        variations.forEach((variation) => {
+                            const wrapper = document.createElement('div');
+                            wrapper.className = 'variation-wrapper';
+                            wrapper.style.backgroundColor = 'white';
+                            wrapper.style.padding = '10px';
+                            wrapper.style.borderRadius = '8px';
+                            wrapper.style.boxShadow = '0 2px 4px rgba(0,0,0,0.1)';
+                            
+                            const canvas = document.createElement('canvas');
+                            canvas.width = variation.width;
+                            canvas.height = variation.height;
+                            canvas.style.border = '1px solid #ddd';
+                            canvas.style.borderRadius = '4px';
+                            
+                            const ctx = canvas.getContext('2d');
+                            
+                            // Clear canvas
+                            ctx.clearRect(0, 0, canvas.width, canvas.height);
+                            
+                            // Draw shifted image
+                            const imageData = new ImageData(
+                                variation.imageData,
+                                variation.width,
+                                variation.height
+                            );
+                            ctx.putImageData(imageData, 0, 0);
+                            
+                            // Draw points and lines
+                            // if (variation.extremePoints) {
+                            //     Object.entries(variation.extremePoints).forEach(([partName, points]) => {
+                            //         if (points.top && points.bottom) {
+                            //             // Set color based on part name
+                            //             let lineColor, pointColor;
+                                        
+                            //             if (partName === 'leftUpperArmFront') {
+                            //                 lineColor = '#FF000080'; // Red with transparency
+                            //                 pointColor = '#FF0000';  // Solid red
+                            //             } else {
+                            //                 lineColor = partName.includes('Front') ? '#0000FF80' : '#00FF0080';
+                            //                 pointColor = partName.includes('Front') ? '#0000FF' : '#00FF00';
+                            //             }
+                                        
+                            //             // Draw line
+                            //             ctx.beginPath();
+                            //             ctx.moveTo(points.top.x, points.top.y);
+                            //             ctx.lineTo(points.bottom.x, points.bottom.y);
+                            //             ctx.strokeStyle = lineColor;
+                            //             ctx.lineWidth = 2;
+                            //             ctx.stroke();
+                                        
+                            //             // Draw points
+                            //             [points.top, points.bottom].forEach(point => {
+                            //                 ctx.beginPath();
+                            //                 ctx.arc(point.x, point.y, 4, 0, 2 * Math.PI);
+                            //                 ctx.fillStyle = pointColor;
+                            //                 ctx.fill();
+                            //             });
+                            //         }
+                            //     });
+                            // }
+                         
+                            if (variation.extremePoints) {
+    // First draw original extreme points
+    Object.entries(variation.extremePoints).forEach(([partName, points]) => {
+        if (points.top && points.bottom) {
+            // Original coloring logic for extreme points
+            let lineColor, pointColor;
+            
+            if (partName === 'leftUpperArmFront') {
+                lineColor = '#FF000080'; // Red with transparency
+                pointColor = '#FF0000';  // Solid red
+            } else {
+                lineColor = partName.includes('Front') ? '#0000FF80' : '#00FF0080';
+                pointColor = partName.includes('Front') ? '#0000FF' : '#00FF00';
+            }
+            
+            // Draw line
+            ctx.beginPath();
+            ctx.moveTo(points.top.x, points.top.y);
+            ctx.lineTo(points.bottom.x, points.bottom.y);
+            ctx.strokeStyle = lineColor;
+            ctx.lineWidth = 2;
+            ctx.stroke();
+            
+            // Draw points
+            [points.top, points.bottom].forEach(point => {
+                ctx.beginPath();
+                ctx.arc(point.x, point.y, 4, 0, 2 * Math.PI);
+                ctx.fillStyle = pointColor;
+                ctx.fill();
+            });
+        }
+    });
+
+    // Draw average points for upper arm
+    if (variation.extremePoints.leftUpperArmAverage) {
+        const avgPoints = variation.extremePoints.leftUpperArmAverage;
+        
+        // Draw center line (yellow)
+        ctx.beginPath();
+        ctx.moveTo(avgPoints.center.top.x, avgPoints.center.top.y);
+        ctx.lineTo(avgPoints.center.bottom.x, avgPoints.center.bottom.y);
+        ctx.strokeStyle = '#FFD70080'; // Gold with transparency
+        ctx.lineWidth = 3;
+        ctx.stroke();
+
+        // Draw center points (larger yellow dots)
+        [avgPoints.center.top, avgPoints.center.bottom].forEach(point => {
+            ctx.beginPath();
+            ctx.arc(point.x, point.y, 6, 0, 2 * Math.PI);
+            ctx.fillStyle = '#FFD700';
+            ctx.fill();
+        });
+    }
+
+    // Draw average points for lower arm
+    if (variation.extremePoints.leftLowerArmAverage) {
+        const avgPoints = variation.extremePoints.leftLowerArmAverage;
+        
+        // Draw center line (purple)
+        ctx.beginPath();
+        ctx.moveTo(avgPoints.center.top.x, avgPoints.center.top.y);
+        ctx.lineTo(avgPoints.center.bottom.x, avgPoints.center.bottom.y);
+        ctx.strokeStyle = '#80008080'; // Purple with transparency
+        ctx.lineWidth = 3;
+        ctx.stroke();
+
+        // Draw center points (larger purple dots)
+        [avgPoints.center.top, avgPoints.center.bottom].forEach(point => {
+            ctx.beginPath();
+            ctx.arc(point.x, point.y, 6, 0, 2 * Math.PI);
+            ctx.fillStyle = '#800080';
+            ctx.fill();
+        });
+    }
+}
+                            console.log('variation :>> ', variation);
+                            // Draw rotation center point if it exists
+                            if (variation.rotationCenter) {
+                                ctx.beginPath();
+                                ctx.arc(variation.rotationCenter.x, variation.rotationCenter.y, 6, 0, 2 * Math.PI);
+                                ctx.fillStyle = '#FFA500'; // Orange color for rotation center
+                                ctx.fill();
+                                ctx.strokeStyle = '#000';
+                                ctx.lineWidth = 2;
+                                ctx.stroke();
+                            }
+                            
+                            const label = document.createElement('div');
+                            label.style.textAlign = 'center';
+                            label.style.marginTop = '8px';
+                            label.style.fontFamily = 'Arial, sans-serif';
+                            label.style.fontSize = '14px';
+                            // label.innerHTML = `Offset: x=${variation.shift.x}, y=${variation.shift.y}<br>Rotation: ${variation.rotation}°`;
+                            
+                            wrapper.appendChild(canvas);
+                            wrapper.appendChild(label);
+                            container.appendChild(wrapper);
+                        });
+                    };
+
+                    visualizeVariations(e.data.variations, container);
+                }
+            };
+
+            // Handle worker errors
+            postprocessingWorker.onerror = function(error) {
+                console.error('Post-processing worker error:', error);
+            };
+        }
+    };
+}
+
+async function loadModels() {
+    try {
+        net = await bodyPix.load({
+            architecture: 'MobileNetV1',
+            outputStride: 16,
+            multiplier: 0.75,
+            quantBytes: 2
+        });
+    } catch (error) {
+        throw error;
+    }
+}
+
+document.getElementById('sourceImage').onload = async function() {
+    await loadModels();
+    await processImageWithOverlay();
+};
+
+</script>
+</body>
+</html>
